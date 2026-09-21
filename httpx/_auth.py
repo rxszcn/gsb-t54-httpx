@@ -84,6 +84,25 @@ class Auth:
             except StopIteration:
                 break
 
+    def sync_auth_to_request(self, request: Request) -> None:
+        """
+        Re-apply authentication to a request that has already been prepared
+        for dispatch.
+
+        This is used when following redirects, allowing authentication
+        schemes which include request-specific information (notably HTTP
+        Digest authentication, whose 'uri' and 'nc' parameters are
+        per-request) to recompute the 'Authorization' header for the
+        request that is actually being sent.
+        """
+
+    async def async_auth_to_request(self, request: Request) -> None:
+        """
+        Re-apply authentication to a request that has already been prepared
+        for dispatch.
+        """
+        self.sync_auth_to_request(request)
+
     async def async_auth_flow(
         self, request: Request
     ) -> typing.AsyncGenerator[Request, Response]:
@@ -220,6 +239,17 @@ class DigestAuth(Auth):
         if response.cookies:
             Cookies(response.cookies).set_cookie_header(request=request)
         yield request
+
+    def sync_auth_to_request(self, request: Request) -> None:
+        if self._last_challenge is not None:
+            # Recompute the 'Authorization' header for the request that is
+            # actually being sent. A header carried over from a previous
+            # request (e.g. when following a redirect) must not be reused,
+            # since the Digest 'uri' must match this request's target and
+            # the nonce count ('nc') must increase with every request.
+            request.headers["Authorization"] = self._build_auth_header(
+                request, self._last_challenge
+            )
 
     def _parse_challenge(
         self, request: Request, response: Response, auth_header: str

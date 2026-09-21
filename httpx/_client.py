@@ -941,6 +941,7 @@ class Client(BaseClient):
             while True:
                 response = self._send_handling_redirects(
                     request,
+                    auth=auth,
                     follow_redirects=follow_redirects,
                     history=history,
                 )
@@ -964,6 +965,7 @@ class Client(BaseClient):
     def _send_handling_redirects(
         self,
         request: Request,
+        auth: Auth,
         follow_redirects: bool,
         history: list[Response],
     ) -> Response:
@@ -986,6 +988,13 @@ class Client(BaseClient):
                     return response
 
                 request = self._build_redirect_request(request, response)
+                if "Authorization" in request.headers:
+                    # An 'Authorization' header that survived the redirect is
+                    # still valid for this origin, but schemes such as Digest
+                    # must recompute it so that request-specific fields ('uri',
+                    # 'nc') match the new request. Headers stripped on
+                    # cross-origin redirects are not re-added.
+                    auth.sync_auth_to_request(request)
                 history = history + [response]
 
                 if follow_redirects:
@@ -1656,6 +1665,7 @@ class AsyncClient(BaseClient):
             while True:
                 response = await self._send_handling_redirects(
                     request,
+                    auth=auth,
                     follow_redirects=follow_redirects,
                     history=history,
                 )
@@ -1679,6 +1689,7 @@ class AsyncClient(BaseClient):
     async def _send_handling_redirects(
         self,
         request: Request,
+        auth: Auth,
         follow_redirects: bool,
         history: list[Response],
     ) -> Response:
@@ -1702,6 +1713,13 @@ class AsyncClient(BaseClient):
                     return response
 
                 request = self._build_redirect_request(request, response)
+                if "Authorization" in request.headers:
+                    # An 'Authorization' header that survived the redirect is
+                    # still valid for this origin, but schemes such as Digest
+                    # must recompute it so that request-specific fields ('uri',
+                    # 'nc') match the new request. Headers stripped on
+                    # cross-origin redirects are not re-added.
+                    await auth.async_auth_to_request(request)
                 history = history + [response]
 
                 if follow_redirects:

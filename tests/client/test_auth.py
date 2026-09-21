@@ -7,6 +7,7 @@ Unit tests for auth classes also exist in tests/test_auth.py
 import hashlib
 import netrc
 import os
+import re
 import sys
 import threading
 import typing
@@ -770,3 +771,108 @@ def test_sync_auth() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"auth": "sync-auth"}
+
+
+def _digest_redirect_app(log):
+    def app(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers.get("authorization")
+        if authorization is None:
+            return httpx.Response(
+                401,
+                headers={
+                    "www-authenticate": 'Digest realm="r", nonce="n", qop="auth"'
+                },
+            )
+
+        uri = re.search(r'uri="([^"]*)"', authorization).group(1)
+        nc = re.search(r"nc=([0-9a-f]+)", authorization).group(1)
+        log.append((request.url.path, request.url.query.decode("ascii"), uri, nc))
+
+        if request.url.path == "/original":
+            return httpx.Response(302, headers={"location": "/mid?x=1"})
+        if request.url.path == "/mid":
+            return httpx.Response(302, headers={"location": "/target"})
+        return httpx.Response(200, json={"auth": authorization})
+
+    return app
+
+
+def test_digest_auth_redirect_recomputes_header() -> None:
+    # When following redirects the Digest 'Authorization' header must be
+    # recomputed for every request: 'uri' matches the request target
+    # (including the query) and 'nc' increases for each hop.
+    log = []
+    with httpx.Client(
+        transport=httpx.MockTransport(_digest_redirect_app(log)),
+        auth=httpx.DigestAuth("user", "pass"),
+        follow_redirects=True,
+    ) as client:
+        response = client.get("http://example.com/original")
+
+    assert response.status_code == 200
+    assert str(response.url) == "http://example.com/target"
+    assert log == [
+        ("/original", "", "/original", "00000001"),
+        ("/mid", "x=1", "/mid?x=1", "00000002"),
+        ("/target", "", "/target", "00000003"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_digest_auth_async_redirect_matches_sync() -> None:
+    # The async channel must recompute the Digest header identically.
+    log = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_digest_redirect_app(log)),
+        auth=httpx.DigestAuth("user", "pass"),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get("http://example.com/original")
+
+    assert response.status_code == 200
+    assert str(response.url) == "http://example.com/target"
+    assert log == [
+        ("/original", "", "/original", "00000001"),
+        ("/mid", "x=1", "/mid?x=1", "00000002"),
+        ("/target", "", "/target", "00000003"),
+    ]
+
+
+def test_digest_auth_cross_origin_redirect_strips_header() -> None:
+    # Recomputing the header must not re-add credentials that were stripped
+    # because the redirect crossed origins.
+    seen = []
+
+    def app(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers.get("authorization")
+        seen.append((request.url.host, request.url.path, authorization))
+        if authorization is None:
+            if request.url.host == "other.example":
+                # The cross-origin target does not challenge us.
+                return httpx.Response(200, json={})
+            return httpx.Response(
+                401,
+                headers={
+                    "www-authenticate": 'Digest realm="r", nonce="n", qop="auth"'
+                },
+            )
+        if request.url.path == "/original":
+            return httpx.Response(
+                302, headers={"location": "http://other.example/target"}
+            )
+        return httpx.Response(200, json={})
+
+    with httpx.Client(
+        transport=httpx.MockTransport(app),
+        auth=httpx.DigestAuth("user", "pass"),
+        follow_redirects=True,
+    ) as client:
+        response = client.get("http://example.com/original")
+
+    assert response.status_code == 200
+    # The authenticated request to '/original' carried a Digest header ...
+    assert seen[1][0] == "example.com"
+    assert seen[1][1] == "/original"
+    assert seen[1][2] is not None and seen[1][2].startswith("Digest")
+    # ... which must be stripped on the cross-origin hop and not re-added.
+    assert seen[2] == ("other.example", "/target", None)
