@@ -35,6 +35,19 @@ class Auth:
     requires_request_body = False
     requires_response_body = False
 
+    def auth_request(self, request: Request) -> Request:
+        """
+        Re-apply this authentication scheme to a request that was not produced
+        by the authentication flow, such as one built while following a
+        redirect.
+
+        The default implementation leaves the request untouched. Schemes
+        whose credentials are request-specific (such as 'DigestAuth') override
+        this to compute a fresh 'Authorization' header for the new request,
+        rather than reusing the header carried over from the previous request.
+        """
+        return request
+
     def auth_flow(self, request: Request) -> typing.Generator[Request, Response, None]:
         """
         Execute the authentication flow.
@@ -220,6 +233,22 @@ class DigestAuth(Auth):
         if response.cookies:
             Cookies(response.cookies).set_cookie_header(request=request)
         yield request
+
+    def auth_request(self, request: Request) -> Request:
+        # When following a redirect the 'Authorization' header computed for
+        # the previous request must not be reused: the digest 'uri' has to
+        # match the new request-target and the nonce count has to increase
+        # with every request (RFC 7616, section 3.4). Recompute the header
+        # for the request that is actually about to be sent.
+        #
+        # Cross-origin redirects have already had their 'Authorization'
+        # header stripped by the client; leave those untouched so that
+        # credentials are not reintroduced for a different origin.
+        if self._last_challenge and "Authorization" in request.headers:
+            request.headers["Authorization"] = self._build_auth_header(
+                request, self._last_challenge
+            )
+        return request
 
     def _parse_challenge(
         self, request: Request, response: Response, auth_header: str

@@ -943,6 +943,7 @@ class Client(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    auth=auth,
                 )
                 try:
                     try:
@@ -966,6 +967,7 @@ class Client(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        auth: Auth | None = None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -989,6 +991,8 @@ class Client(BaseClient):
                 history = history + [response]
 
                 if follow_redirects:
+                    if auth is not None:
+                        request = auth.auth_request(request)
                     response.read()
                 else:
                     response.next_request = request
@@ -1658,6 +1662,7 @@ class AsyncClient(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    auth=auth,
                 )
                 try:
                     try:
@@ -1681,6 +1686,7 @@ class AsyncClient(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        auth: Auth | None = None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -1705,6 +1711,8 @@ class AsyncClient(BaseClient):
                 history = history + [response]
 
                 if follow_redirects:
+                    if auth is not None:
+                        request = auth.auth_request(request)
                     await response.aread()
                 else:
                     response.next_request = request

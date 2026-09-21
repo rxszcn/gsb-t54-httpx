@@ -770,3 +770,107 @@ def test_sync_auth() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"auth": "sync-auth"}
+
+
+def _digest_redirect_handler(log: typing.List[typing.Any]) -> typing.Callable[
+    [httpx.Request], httpx.Response
+]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers.get("Authorization")
+        fields = (
+            parse_keqv_list(authorization.split(", ")) if authorization else {}
+        )
+        log.append(
+            (
+                request.url.raw_path.decode(),
+                fields.get("uri", "").strip('"'),
+                fields.get("nc"),
+            )
+        )
+        if authorization is None:
+            return httpx.Response(
+                401,
+                headers={
+                    "www-authenticate": 'Digest realm="r", nonce="n2", qop="auth"'
+                },
+            )
+        if request.url.path == "/original":
+            return httpx.Response(302, headers={"location": "/mid?x=1"})
+        if request.url.path == "/mid":
+            return httpx.Response(302, headers={"location": "/target"})
+        return httpx.Response(200, text="final")
+
+    return handler
+
+
+def test_sync_digest_auth_tracks_redirect_target() -> None:
+    log: typing.List[typing.Any] = []
+    with httpx.Client(
+        transport=httpx.MockTransport(_digest_redirect_handler(log)),
+        auth=httpx.DigestAuth("u", "p"),
+        follow_redirects=True,
+    ) as client:
+        response = client.get("http://example.com/original")
+
+    assert response.status_code == 200
+    assert response.url == "http://example.com/target"
+    assert log == [
+        ("/original", "", None),
+        ("/original", "/original", "00000001"),
+        ("/mid?x=1", "/mid?x=1", "00000002"),
+        ("/target", "/target", "00000003"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_async_digest_auth_tracks_redirect_target() -> None:
+    log: typing.List[typing.Any] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_digest_redirect_handler(log)),
+        auth=httpx.DigestAuth("u", "p"),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get("http://example.com/original")
+
+    assert response.status_code == 200
+    assert response.url == "http://example.com/target"
+    assert log == [
+        ("/original", "", None),
+        ("/original", "/original", "00000001"),
+        ("/mid?x=1", "/mid?x=1", "00000002"),
+        ("/target", "/target", "00000003"),
+    ]
+
+
+def test_digest_auth_redirect_strips_credentials_cross_origin() -> None:
+    seen: typing.List[typing.Tuple[str, typing.Optional[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("Authorization")))
+        if request.url.path == "/original":
+            if request.headers.get("Authorization") is None:
+                return httpx.Response(
+                    401,
+                    headers={
+                        "www-authenticate": (
+                            'Digest realm="r", nonce="n", qop="auth"'
+                        )
+                    },
+                )
+            return httpx.Response(
+                302, headers={"location": "http://other.example/target"}
+            )
+        return httpx.Response(200, text="final")
+
+    with httpx.Client(
+        transport=httpx.MockTransport(handler),
+        auth=httpx.DigestAuth("u", "p"),
+        follow_redirects=True,
+    ) as client:
+        response = client.get("http://example.com/original")
+
+    assert response.status_code == 200
+    assert seen[0][1] is None
+    assert seen[1][1] is not None
+    assert seen[2][0] == "http://other.example/target"
+    assert seen[2][1] is None
